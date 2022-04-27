@@ -18,6 +18,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include "json/json.hpp"
+
 static_assert(std::endian::native == std::endian::little, "Must run on a little-endian machine!");
 
 using guid = std::array<std::uint8_t, 16>;
@@ -327,93 +329,85 @@ void write_gpt(const std::string& path, const gpt_descriptor& descriptor, const 
 // I/O Driver
 //
 
-std::istream& operator>>(std::istream& stream, guid& dest) {
-    int pos = 0;
+guid parse_guid(const std::string& str) {
+    if (str.length() != 36) {
+        throw std::invalid_argument("not a UUID!");
+    }
 
-    auto read_chunk = [&](unsigned count, bool last = false){
+    guid dest{};
+    int pos = 0;
+    auto str_iter = str.begin();
+
+    auto check_iterator = [&str, &str_iter] {
+        if (str_iter == str.end()) {
+            throw std::invalid_argument("Error parsing GUID!");
+        }
+    };
+
+    auto read_chunk = [&](unsigned count) {
         for (int end = pos + count; pos < end; ++pos) {
             std::array<char, 2> input;
-            input.at(0) = stream.get();
-            input.at(1) = stream.get();
+            check_iterator();
+            input.at(0) = *(str_iter++);
+            check_iterator();
+            input.at(1) = *(str_iter++);
             dest.at(pos) = static_cast<std::uint8_t>(std::stoul(std::string{input.data(), input.size()}, nullptr, 16));
         }
 
-        if (!last) {
-            if (char separator = stream.get(); separator != '-') {
+        if (str_iter != str.end()) {
+            if (*(str_iter++) != '-') {
                 throw std::invalid_argument("Not a dash separator!");
             }
         }
     };
 
-    stream >> std::ws;
     read_chunk(4);
     read_chunk(2);
     read_chunk(2);
     read_chunk(2);
-    read_chunk(6, true);
+    read_chunk(6);
 
-    return stream;
+    return dest;
 }
 
-std::istream& operator>>(std::istream& stream, gpt_partition_entry& dest) {
-    stream >> dest.partition_type_guid;
-    stream >> dest.unique_partition_guid;
 
-    // Work around some packed struct weirdness.
-    std::uint64_t temp;
-    stream >> temp; dest.starting_lba = temp;
-    stream >> temp; dest.ending_lba = temp;
-    stream >> temp; dest.attributes = temp;
-    stream >> std::ws;
+gpt_descriptor parse_gpt_descriptor(const json_value::json_value_ptr& v) {
+    auto obj = std::get<json_value::json_object>(v->value);
 
-    // Read the rest of the line as the utf-8 encoded string representing the partition name. Reading to the end of the
-    // line allows everything other than newlines to appear in the name. Newlines in the name are probably technically
-    // allowed since it's arbitrary utf-16, but we don't have to allow everything.
-    std::string partition_name_u8;
-    std::getline(stream, partition_name_u8);
+    gpt_descriptor descriptor;
+    descriptor.block_size = static_cast<std::uint64_t>(std::get<double>(obj.at("block_size")->value));
+    descriptor.number_of_blocks = static_cast<std::uint64_t>(std::get<double>(obj.at("number_of_blocks")->value));
+    descriptor.disk_guid = parse_guid(std::get<std::string>(obj.at("disk_guid")->value));
+    for (std::shared_ptr<json_value> p_val : std::get<json_value::json_array>(obj.at("partitions")->value)) {
+        auto p_obj = std::get<json_value::json_object>(p_val->value);
 
-    auto convert = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{};
-    std::u16string partition_name_u16 = convert.from_bytes(partition_name_u8);
+        descriptor.partitions.push_back(
+            gpt_partition_entry {
+                .partition_type_guid = parse_guid(std::get<std::string>(p_obj.at("partition_type_guid")->value)),
+                .unique_partition_guid = parse_guid(std::get<std::string>(p_obj.at("unique_partition_guid")->value)),
+                .starting_lba = static_cast<std::uint64_t>(std::get<double>(p_obj.at("starting_lba")->value)),
+                .ending_lba = static_cast<std::uint64_t>(std::get<double>(p_obj.at("ending_lba")->value)),
+                .attributes = static_cast<std::uint64_t>(std::get<double>(p_obj.at("attributes")->value)),
+                .partition_name{}
+            }
+        );
 
-    if (partition_name_u16.size() > dest.partition_name.size()) {
-        throw std::runtime_error("Partition name too long!");
+        auto convert = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{};
+        std::u16string name16 = convert.from_bytes(std::get<std::string>(p_obj.at("partition_name")->value));
+        if (name16.size() > 36) {
+            throw std::invalid_argument("partition name too long!");
+        }
+        std::copy(name16.begin(), name16.end(), descriptor.partitions.back().partition_name.data());
     }
 
-    for (auto iter = dest.partition_name.begin(); char16_t c : partition_name_u16) {
-        *(iter++) = c;
-    }
-
-    return stream;
-}
-
-std::istream& operator>>(std::istream& stream, gpt_descriptor& dest) {
-    std::size_t num_partitions;
-
-    stream >> dest.block_size >> dest.number_of_blocks >> dest.disk_guid >> num_partitions;
-
-    for (std::size_t i = 0; i < num_partitions; ++i) {
-        gpt_partition_entry entry {
-            .partition_type_guid{0},
-            .unique_partition_guid{0},
-            .starting_lba{0},
-            .ending_lba{0},
-            .attributes{0},
-            .partition_name{0}
-        };
-        stream >> entry;
-        dest.partitions.push_back(entry);
-    }
-
-    return stream;
+    return descriptor;
 }
 
 int main() {
     try {
-        std::string destination;
-        gpt_descriptor descriptor;
-        std::cin >> destination >> descriptor;
+        gpt_descriptor descriptor = parse_gpt_descriptor(json_value::parse(std::cin));
         auto data = make_gpt(descriptor);
-        write_gpt(destination, descriptor, data);
+        write_gpt("gpt.bin", descriptor, data);
     } catch (const std::exception& error) {
         std::cerr << "FATAL ERROR: " << error.what() << std::endl;
         return EXIT_FAILURE;
