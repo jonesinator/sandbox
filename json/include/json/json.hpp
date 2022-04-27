@@ -10,7 +10,7 @@ struct json_value {
     using json_object = std::map<std::string, json_value_ptr>;
     using json_data = std::variant<std::monostate, std::string, double, bool, json_array, json_object>;
 
+    static json_value_ptr parse(std::istream& stream);
+
     json_data value;
 };
-
-json_value::json_value_ptr json_parse(std::istream& stream);

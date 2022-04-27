@@ -54,7 +54,7 @@ static void read_array(json_value::json_array& arr, std::istream& stream) {
     while (true) {
         // Read the value.
         stream >> std::ws;
-        arr.push_back(json_parse(stream));
+        arr.push_back(json_value::parse(stream));
         stream >> std::ws;
 
         // Determine if there are more values to read.
@@ -82,7 +82,7 @@ static void read_object(json_value::json_object& obj, std::istream& stream) {
 
         // Read the value.
         stream >> std::ws;
-        obj.insert({key, json_parse(stream)});
+        obj.insert({key, json_value::parse(stream)});
         stream >> std::ws;
 
         // Determine if there are more values to read.
@@ -96,7 +96,7 @@ static void read_object(json_value::json_object& obj, std::istream& stream) {
     }
 }
 
-json_value::json_value_ptr json_parse(std::istream& stream) {
+json_value::json_value_ptr json_value::parse(std::istream& stream) {
     json_value::json_value_ptr v = std::make_shared<json_value>();
 
     stream >> std::ws;
