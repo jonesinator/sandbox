@@ -7,15 +7,29 @@
 static void read_constant(const std::string& expected, std::istream& stream) {
     for (const auto expected_c : expected) {
         if (const char8_t actual_c = stream.get(); actual_c != expected_c) {
-            throw std::runtime_error("parse error! good luck!");
+            throw std::runtime_error("unable to read constant");
         }
     }
+}
+
+static char16_t read_escaped_unicode_hex(std::istream& stream) {
+    std::string hex_str;
+
+    for (int j = 0; j < 4; ++j) {
+        if (char8_t c = stream.get(); std::isxdigit(c)) {
+            hex_str += c;
+        } else {
+            throw std::runtime_error("got non-hex digit or eof in escaped unicode character");
+        }
+    }
+
+    return static_cast<char16_t>(std::stoul(hex_str, nullptr, 16));
 }
 
 static void read_string(std::string& str, std::istream& stream) {
     while (true) {
         if (char8_t c = stream.get(); stream.eof() || std::iscntrl(c)) {
-            throw std::runtime_error("parse error! good luck!");
+            throw std::runtime_error("got eof or control character while reading string");
         } else if (c == '"') {
             break;
         } else if (c == '\\') {
@@ -29,20 +43,17 @@ static void read_string(std::string& str, std::istream& stream) {
             case 'r':  str += '\r'; break;
             case 't':  str += '\t'; break;
             case 'u': {
-                std::string hex_codepoint;
-                for (int i = 0; i < 4; ++i) {
-                    if (char8_t c = stream.get(); std::isxdigit(c)) {
-                        hex_codepoint += c;
-                    }
-
-                    throw std::runtime_error("parse error! good luck!");
+                std::u16string u16char;
+                u16char.push_back(read_escaped_unicode_hex(stream));
+                if (u16char[0] >= 0xd800 && u16char[0] <= 0xdbff) {
+                    read_constant("\\u", stream);
+                    u16char.push_back(read_escaped_unicode_hex(stream));
                 }
 
-                unsigned long codepoint = std::stoul(hex_codepoint, nullptr, 16);
-                str += std::wstring_convert<std::codecvt_utf8<char32_t>, char32_t>{}.to_bytes(codepoint);
+                str += std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{}.to_bytes(u16char);
                 break;
             }
-            default: throw std::runtime_error("parse error! good luck!");
+            default: throw std::runtime_error("illegal escape character or eof");
             }
         } else {
             str += c;
@@ -51,6 +62,12 @@ static void read_string(std::string& str, std::istream& stream) {
 }
 
 static void read_array(json_value::json_array& arr, std::istream& stream) {
+    // Check for empty.
+    stream >> std::ws;
+    if (stream.peek() == ']') {
+        return;
+    }
+
     while (true) {
         // Read the value.
         stream >> std::ws;
@@ -63,12 +80,17 @@ static void read_array(json_value::json_array& arr, std::istream& stream) {
         } else if (next == ']') {
             break;
         } else {
-            throw std::runtime_error("parse error! good luck!");
+            throw std::runtime_error("error reading array");
         }
     }
 }
 
 static void read_object(json_value::json_object& obj, std::istream& stream) {
+    // Check for empty.
+    if (stream.peek() == '}') {
+        return;
+    }
+
     while (true) {
         // Read the key.
         stream >> std::ws;
@@ -91,7 +113,7 @@ static void read_object(json_value::json_object& obj, std::istream& stream) {
         } else if (next == '}') {
             break;
         } else {
-            throw std::runtime_error("parse error! good luck!");
+            throw std::runtime_error("error reading object");
         }
     }
 }
@@ -121,10 +143,10 @@ json_value::json_value_ptr json_value::parse(std::istream& stream) {
         stream.ignore();
         read_constant("ull", stream);
         v->value = std::monostate{};
-    } else if ((first = '-') || (first >= '0' && first <= '9')) {
+    } else if (first == '-' || std::isdigit(first)) {
         stream >> v->value.emplace<double>();
     } else {
-        throw std::runtime_error("parse error! good luck!");
+        throw std::runtime_error("illegal first character");
     }
 
     return v;

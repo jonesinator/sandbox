@@ -29,8 +29,7 @@ struct add_test {
 void validate(const cli_arguments& arguments) {
     std::cout << arguments.at(0) << std::endl;
     std::stringstream ss(arguments.at(0));
-    auto v = json_value::parse(ss);
-    std::cout << v->value.index() << std::endl;
+    json_value::parse(ss);
 }
 auto validate_test = add_test("validate", validate);
 

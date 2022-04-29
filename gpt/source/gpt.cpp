@@ -372,28 +372,28 @@ guid parse_guid(const std::string& str) {
 
 
 gpt_descriptor parse_gpt_descriptor(const json_value::json_value_ptr& v) {
-    auto obj = std::get<json_value::json_object>(v->value);
+    auto obj = std::get<json_value::json_object>(**v);
 
     gpt_descriptor descriptor;
-    descriptor.block_size = static_cast<std::uint64_t>(std::get<double>(obj.at("block_size")->value));
-    descriptor.number_of_blocks = static_cast<std::uint64_t>(std::get<double>(obj.at("number_of_blocks")->value));
-    descriptor.disk_guid = parse_guid(std::get<std::string>(obj.at("disk_guid")->value));
-    for (std::shared_ptr<json_value> p_val : std::get<json_value::json_array>(obj.at("partitions")->value)) {
-        auto p_obj = std::get<json_value::json_object>(p_val->value);
+    descriptor.block_size = static_cast<std::uint64_t>(std::get<double>(**obj.at("block_size")));
+    descriptor.number_of_blocks = static_cast<std::uint64_t>(std::get<double>(**obj.at("number_of_blocks")));
+    descriptor.disk_guid = parse_guid(std::get<std::string>(**obj.at("disk_guid")));
+    for (std::shared_ptr<json_value> p_val : std::get<json_value::json_array>(**obj.at("partitions"))) {
+        auto p_obj = std::get<json_value::json_object>(**p_val);
 
         descriptor.partitions.push_back(
             gpt_partition_entry {
-                .partition_type_guid = parse_guid(std::get<std::string>(p_obj.at("partition_type_guid")->value)),
-                .unique_partition_guid = parse_guid(std::get<std::string>(p_obj.at("unique_partition_guid")->value)),
-                .starting_lba = static_cast<std::uint64_t>(std::get<double>(p_obj.at("starting_lba")->value)),
-                .ending_lba = static_cast<std::uint64_t>(std::get<double>(p_obj.at("ending_lba")->value)),
-                .attributes = static_cast<std::uint64_t>(std::get<double>(p_obj.at("attributes")->value)),
+                .partition_type_guid = parse_guid(std::get<std::string>(**p_obj.at("partition_type_guid"))),
+                .unique_partition_guid = parse_guid(std::get<std::string>(**p_obj.at("unique_partition_guid"))),
+                .starting_lba = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("starting_lba"))),
+                .ending_lba = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("ending_lba"))),
+                .attributes = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("attributes"))),
                 .partition_name{}
             }
         );
 
         auto convert = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{};
-        std::u16string name16 = convert.from_bytes(std::get<std::string>(p_obj.at("partition_name")->value));
+        std::u16string name16 = convert.from_bytes(std::get<std::string>(**p_obj.at("partition_name")));
         if (name16.size() > 36) {
             throw std::invalid_argument("partition name too long!");
         }

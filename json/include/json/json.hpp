@@ -12,5 +12,13 @@ struct json_value {
 
     static json_value_ptr parse(std::istream& stream);
 
+    constexpr json_data& operator*() noexcept {
+	return value;
+    }
+
+    constexpr const json_data& operator*() const noexcept {
+	return value;
+    }
+
     json_data value;
 };
