@@ -87,6 +87,7 @@ static void read_array(json_value::json_array& arr, std::istream& stream) {
 
 static void read_object(json_value::json_object& obj, std::istream& stream) {
     // Check for empty.
+    stream >> std::ws;
     if (stream.peek() == '}') {
         return;
     }
