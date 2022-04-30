@@ -1,33 +1,16 @@
 // Utility that can create a file representing a block device with a GPT partition scheme.
 
-#include <array>
-#include <bit>
-#include <cctype>
-#include <cerrno>
-#include <codecvt>
-#include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <limits>
-#include <locale>
 #include <span>
-#include <string>
-#include <system_error>
-#include <unistd.h>
-#include <vector>
+#include <stdexcept>
 
-#include "json/json.hpp"
+#include "core/crc32.hpp"
+#include "gpt/gpt.hpp"
 
+// The data structures are defined as little-endian, and who uses big-endian these days?
 static_assert(std::endian::native == std::endian::little, "Must run on a little-endian machine!");
-
-using guid = std::array<std::uint8_t, 16>;
-using lba = std::uint64_t;
-
-//
-// Data Structures as defined by the UEFI Spec 2.8 in Section 5
-//
 
 // UEFI Spec 2.8 -- Section 5.2.3 Table 20
 struct gpt_protective_mbr_partition_record {
@@ -68,62 +51,6 @@ struct gpt_header {
     std::uint32_t partition_entry_checksum;
 } __attribute__ ((packed));
 static_assert(sizeof(gpt_header) == 92);
-
-// UEFI Spec 2.8 -- Section 5.3.2 Table 22.
-struct gpt_partition_entry {
-    guid partition_type_guid;
-    guid unique_partition_guid;
-    lba starting_lba;
-    lba ending_lba;
-    std::uint64_t attributes;
-    std::array<char16_t, 36> partition_name;
-} __attribute__ ((packed));
-static_assert(sizeof(gpt_partition_entry) == 128);
-
-//
-// Utilities
-//
-
-// Slow but succinct method of computing the crc32 of an arbitrary amount of data.
-constexpr std::uint32_t crc32(std::span<const std::byte> data) {
-    std::uint32_t crc = 0xffffffff;
-
-    for (std::byte byte : data) {
-        for (std::size_t bit = 0; bit < 8; bit++, byte >>= 1) {
-            std::uint32_t b = (static_cast<std::uint32_t>(byte) ^ crc) & 1;
-            crc >>= 1;
-            crc = b ? crc ^ 0xEDB88320 : crc;
-        }
-    }
-
-    return ~crc;
-}
- 
-static_assert(
-    crc32(
-        std::array<std::byte, 9>{
-            std::byte{'1'}, std::byte{'2'}, std::byte{'3'},
-            std::byte{'4'}, std::byte{'5'}, std::byte{'6'},
-            std::byte{'7'}, std::byte{'8'}, std::byte{'9'}
-        }
-    ) == 0xcbf43926
-);
-
-//
-// Main Algorithm (Construct GPT Data)
-//
-
-struct gpt_descriptor {
-    std::size_t block_size;
-    std::size_t number_of_blocks;
-    guid disk_guid;
-    std::vector<gpt_partition_entry> partitions;
-};
-
-struct gpt_data {
-    std::vector<std::byte> header;
-    std::vector<std::byte> footer;
-};
 
 gpt_data make_gpt(const gpt_descriptor& descriptor) {
 
@@ -270,146 +197,4 @@ gpt_data make_gpt(const gpt_descriptor& descriptor) {
     std::memcpy(data.footer.data() + (1 * descriptor.block_size), &second_gpt_header, sizeof(gpt_header));
 
     return data;
-}
-
-//
-// System Driver (Linux)
-//
-
-struct simple_file {
-    std::FILE* file_handle;
-
-    simple_file(const std::string& path, const std::string& mode) {
-        file_handle = std::fopen(path.c_str(), mode.c_str());
-        if (!file_handle) {
-            throw std::system_error(errno, std::generic_category(), "error opening file");
-        }
-    }
-
-    ~simple_file() {
-        if (std::fclose(file_handle) == EOF) {
-            std::perror("error closing file");
-        }
-    }
-};
-
-void write_gpt(const std::string& path, const gpt_descriptor& descriptor, const gpt_data& data) {
-    simple_file stream(path.c_str(), "wb");
-    std::span header_span{data.header.data(), data.header.size()};
-    std::span footer_span{data.footer.data(), data.footer.size()};
-    std::uint64_t disk_bytes = descriptor.block_size * descriptor.number_of_blocks;
-    int file_descriptor = ::fileno(stream.file_handle);
-
-    if (file_descriptor == -1) {
-        throw std::system_error(errno, std::generic_category(), "error getting file descriptor");
-    }
-
-    if (::ftruncate(file_descriptor, disk_bytes) == -1) {
-        throw std::system_error(errno, std::generic_category(), "error truncating file");
-    }
-
-    if (std::fseek(stream.file_handle, 0, SEEK_SET) != 0) {
-        throw std::system_error(errno, std::generic_category(), "error seeking to beginning of file");
-    }
-
-    if (std::fwrite(std::as_bytes(header_span).data(), header_span.size_bytes(), 1, stream.file_handle) != 1) {
-        throw std::system_error(errno, std::generic_category(), "error writing header");
-    }
-
-    if (std::fseek(stream.file_handle, disk_bytes - footer_span.size_bytes(), SEEK_SET) != 0) {
-        throw std::system_error(errno, std::generic_category(), "error seeking to footer start");
-    }
-
-    if (std::fwrite(std::as_bytes(footer_span).data(), footer_span.size_bytes(), 1, stream.file_handle) != 1) {
-        throw std::system_error(errno, std::generic_category(), "error writing footer");
-    }
-}
-
-//
-// I/O Driver
-//
-
-guid parse_guid(const std::string& str) {
-    if (str.length() != 36) {
-        throw std::invalid_argument("not a UUID!");
-    }
-
-    guid dest{};
-    int pos = 0;
-    auto str_iter = str.begin();
-
-    auto check_iterator = [&str, &str_iter] {
-        if (str_iter == str.end()) {
-            throw std::invalid_argument("Error parsing GUID!");
-        }
-    };
-
-    auto read_chunk = [&](unsigned count) {
-        for (int end = pos + count; pos < end; ++pos) {
-            std::array<char, 2> input;
-            check_iterator();
-            input.at(0) = *(str_iter++);
-            check_iterator();
-            input.at(1) = *(str_iter++);
-            dest.at(pos) = static_cast<std::uint8_t>(std::stoul(std::string{input.data(), input.size()}, nullptr, 16));
-        }
-
-        if (str_iter != str.end()) {
-            if (*(str_iter++) != '-') {
-                throw std::invalid_argument("Not a dash separator!");
-            }
-        }
-    };
-
-    read_chunk(4);
-    read_chunk(2);
-    read_chunk(2);
-    read_chunk(2);
-    read_chunk(6);
-
-    return dest;
-}
-
-
-gpt_descriptor parse_gpt_descriptor(const json_value::json_value_ptr& v) {
-    auto obj = std::get<json_value::json_object>(**v);
-
-    gpt_descriptor descriptor;
-    descriptor.block_size = static_cast<std::uint64_t>(std::get<double>(**obj.at("block_size")));
-    descriptor.number_of_blocks = static_cast<std::uint64_t>(std::get<double>(**obj.at("number_of_blocks")));
-    descriptor.disk_guid = parse_guid(std::get<std::string>(**obj.at("disk_guid")));
-    for (std::shared_ptr<json_value> p_val : std::get<json_value::json_array>(**obj.at("partitions"))) {
-        auto p_obj = std::get<json_value::json_object>(**p_val);
-
-        descriptor.partitions.push_back(
-            gpt_partition_entry {
-                .partition_type_guid = parse_guid(std::get<std::string>(**p_obj.at("partition_type_guid"))),
-                .unique_partition_guid = parse_guid(std::get<std::string>(**p_obj.at("unique_partition_guid"))),
-                .starting_lba = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("starting_lba"))),
-                .ending_lba = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("ending_lba"))),
-                .attributes = static_cast<std::uint64_t>(std::get<double>(**p_obj.at("attributes"))),
-                .partition_name{}
-            }
-        );
-
-        auto convert = std::wstring_convert<std::codecvt_utf8_utf16<char16_t>, char16_t>{};
-        std::u16string name16 = convert.from_bytes(std::get<std::string>(**p_obj.at("partition_name")));
-        if (name16.size() > 36) {
-            throw std::invalid_argument("partition name too long!");
-        }
-        std::copy(name16.begin(), name16.end(), descriptor.partitions.back().partition_name.data());
-    }
-
-    return descriptor;
-}
-
-int main() {
-    try {
-        gpt_descriptor descriptor = parse_gpt_descriptor(json_value::parse(std::cin));
-        auto data = make_gpt(descriptor);
-        write_gpt("gpt.bin", descriptor, data);
-    } catch (const std::exception& error) {
-        std::cerr << "FATAL ERROR: " << error.what() << std::endl;
-        return EXIT_FAILURE;
-    }
 }
